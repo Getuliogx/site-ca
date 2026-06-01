@@ -16,7 +16,6 @@ function cleanDatabaseUrl(url) {
 
 async function getPool() {
   if (pool) return pool;
-
   const databaseUrl = process.env.DATABASE_URL || "";
   if (!databaseUrl) throw new Error("DATABASE_URL não configurado no Render.");
 
@@ -36,6 +35,16 @@ async function getPool() {
 
 function normalize(text = "") {
   return String(text).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+function checkToken(req, res) {
+  const token = String(req.query.token || req.body?.token || "");
+  const expected = String(process.env.COMMAND_SECRET || "carolina-add-watchlist");
+  if (token !== expected) {
+    res.status(403).type("text/plain").send("Token inválido.");
+    return false;
+  }
+  return true;
 }
 
 function parseCommand(raw = "") {
@@ -84,7 +93,15 @@ function parseCommand(raw = "") {
 async function tmdbSearch(parsed) {
   const token = process.env.TMDB_ACCESS_TOKEN || "";
   const apiKey = process.env.TMDB_API_KEY || "";
-  if (!token && !apiKey) return null;
+  if (!token && !apiKey) {
+    return {
+      tmdbId: null,
+      title: parsed.title,
+      year: parsed.year || null,
+      imageUrl: "",
+      description: "",
+    };
+  }
 
   const params = new URLSearchParams({
     query: parsed.title,
@@ -101,23 +118,29 @@ async function tmdbSearch(parsed) {
 
   try {
     const response = await fetch(url, { headers });
-    if (!response.ok) return null;
+    if (!response.ok) throw new Error("TMDB sem resposta OK");
     const data = await response.json();
     const item = Array.isArray(data.results) ? data.results[0] : null;
-    if (!item) return null;
+    if (!item) throw new Error("TMDB sem resultado");
 
-    const title = parsed.tmdbType === "movie" ? item.title : item.name;
+    const foundTitle = parsed.tmdbType === "movie" ? item.title : item.name;
     const date = parsed.tmdbType === "movie" ? item.release_date : item.first_air_date;
 
     return {
       tmdbId: item.id || null,
-      title: title || parsed.title,
+      title: foundTitle || parsed.title,
       year: date ? String(date).slice(0, 4) : parsed.year || null,
       imageUrl: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : "",
       description: item.overview || "",
     };
   } catch {
-    return null;
+    return {
+      tmdbId: null,
+      title: parsed.title,
+      year: parsed.year || null,
+      imageUrl: "",
+      description: "",
+    };
   }
 }
 
@@ -130,76 +153,94 @@ async function tableExists(db, table) {
   }
 }
 
-async function getTableColumns(db, table) {
+async function getColumns(db, table) {
   const [rows] = await db.query(`SHOW COLUMNS FROM \`${table}\``);
   return rows.map((row) => row.Field);
 }
 
-function pickColumn(columns, ...names) {
+function pick(columns, ...names) {
   for (const name of names) if (columns.includes(name)) return name;
   return null;
 }
 
-async function resolveWatchlistTable(db) {
+async function getWatchlistInfo() {
+  const db = await getPool();
   for (const table of ["watchlist", "watchlists"]) {
-    if (await tableExists(db, table)) return table;
+    if (await tableExists(db, table)) {
+      const columns = await getColumns(db, table);
+      return { db, table, columns };
+    }
   }
   throw new Error("Tabela watchlist/watchlists não encontrada.");
 }
 
+async function countActive(db, table) {
+  try {
+    const [rows] = await db.query(`SELECT COUNT(*) AS total FROM \`${table}\` WHERE \`isActive\` = 1`);
+    return rows?.[0]?.total ?? 0;
+  } catch {
+    const [rows] = await db.query(`SELECT COUNT(*) AS total FROM \`${table}\``);
+    return rows?.[0]?.total ?? 0;
+  }
+}
+
 async function insertWatchlist(parsed, media) {
-  const db = await getPool();
-  const table = await resolveWatchlistTable(db);
-  const columns = await getTableColumns(db, table);
+  const { db, table, columns } = await getWatchlistInfo();
 
   const values = {};
   const set = (col, value) => {
     if (col && value !== undefined && value !== null) values[col] = value;
   };
 
-  const typeCol = pickColumn(columns, "contentType", "content_type", "type");
+  const titleCol = pick(columns, "title", "name");
+  const typeCol = pick(columns, "contentType", "content_type", "type");
+  const isActiveCol = pick(columns, "isActive", "is_active");
+  const orderCol = pick(columns, "displayOrder", "display_order", "order");
 
-  set(pickColumn(columns, "userId", "user_id"), Number(process.env.WATCHLIST_USER_ID || 1));
-  set(pickColumn(columns, "title", "name"), media?.title || parsed.title);
+  set(pick(columns, "userId", "user_id"), Number(process.env.WATCHLIST_USER_ID || 1));
+  set(titleCol, media?.title || parsed.title);
   set(typeCol, parsed.contentType);
-  set(pickColumn(columns, "status"), "Na Fila");
-  set(pickColumn(columns, "isActive", "is_active"), 1);
-  set(pickColumn(columns, "tmdbId", "tmdb_id"), media?.tmdbId || undefined);
-  set(pickColumn(columns, "year"), media?.year || parsed.year || undefined);
-  set(pickColumn(columns, "imageUrl", "image_url", "posterUrl", "poster_url"), media?.imageUrl || undefined);
-  set(pickColumn(columns, "description"), media?.description || undefined);
-  set(pickColumn(columns, "seasonNumber", "season_number"), parsed.seasonNumber || undefined);
+  set(pick(columns, "status"), "Na Fila");
+  set(isActiveCol, 1);
+  set(pick(columns, "tmdbId", "tmdb_id"), media?.tmdbId || undefined);
+  set(pick(columns, "year"), media?.year || parsed.year || undefined);
+  set(pick(columns, "imageUrl", "image_url", "posterUrl", "poster_url"), media?.imageUrl || "");
+  set(pick(columns, "description"), media?.description || "");
+  set(pick(columns, "seasonNumber", "season_number"), parsed.seasonNumber || undefined);
 
-  const orderCol = pickColumn(columns, "displayOrder", "display_order", "order");
   if (orderCol) {
-    try {
-      const [rows] = await db.query(`SELECT COALESCE(MAX(\`${orderCol}\`), 0) + 1 AS nextOrder FROM \`${table}\``);
-      set(orderCol, rows?.[0]?.nextOrder || 1);
-    } catch {
-      set(orderCol, 1);
-    }
+    const [rows] = await db.query(`SELECT COALESCE(MAX(\`${orderCol}\`), 0) + 1 AS nextOrder FROM \`${table}\``);
+    set(orderCol, rows?.[0]?.nextOrder || 1);
   }
 
   const now = new Date();
-  set(pickColumn(columns, "createdAt", "created_at"), now);
-  set(pickColumn(columns, "updatedAt", "updated_at"), now);
+  set(pick(columns, "createdAt", "created_at"), now);
+  set(pick(columns, "updatedAt", "updated_at"), now);
 
-  if (!values[pickColumn(columns, "title", "name")]) throw new Error("Campo title/name não encontrado.");
-  if (!values[typeCol]) throw new Error("Campo contentType/type não encontrado.");
+  if (!values[titleCol]) throw new Error("Coluna title/name não encontrada.");
+  if (!values[typeCol]) throw new Error("Coluna contentType/type não encontrada.");
 
   const insertColumns = Object.keys(values);
-  const placeholders = insertColumns.map(() => "?").join(", ");
-  const sql = `INSERT INTO \`${table}\` (${insertColumns.map((c) => `\`${c}\``).join(", ")}) VALUES (${placeholders})`;
-  await db.query(sql, insertColumns.map((c) => values[c]));
+  const sql = `INSERT INTO \`${table}\` (${insertColumns.map((c) => `\`${c}\``).join(", ")}) VALUES (${insertColumns.map(() => "?").join(", ")})`;
+  const [result] = await db.query(sql, insertColumns.map((c) => values[c]));
+  const insertId = result?.insertId || null;
 
-  return { title: values[pickColumn(columns, "title", "name")], contentType: parsed.contentType, seasonNumber: parsed.seasonNumber };
+  const total = await countActive(db, table);
+
+  return {
+    table,
+    insertId,
+    total,
+    title: values[titleCol],
+    contentType: parsed.contentType,
+    seasonNumber: parsed.seasonNumber,
+    columnsUsed: insertColumns,
+  };
 }
 
 async function handleAdd(req, res) {
   try {
-    const token = String(req.query.token || req.body?.token || "");
-    const expected = String(process.env.COMMAND_SECRET || "carolina-add-watchlist");
-    if (token !== expected) return res.status(403).type("text/plain").send("Token inválido.");
+    if (!checkToken(req, res)) return;
 
     const q = String(req.query.q || req.body?.q || "");
     const user = String(req.query.user || req.body?.user || "chat");
@@ -211,10 +252,39 @@ async function handleAdd(req, res) {
     const inserted = await insertWatchlist(parsed, media);
 
     const seasonText = inserted.seasonNumber ? ` T${inserted.seasonNumber}` : "";
-    res.status(200).type("text/plain").send(`✅ ${inserted.contentType}${seasonText} "${inserted.title}" adicionada na Watchlist por ${user}.`);
+    res.status(200).type("text/plain").send(
+      `✅ ${inserted.contentType}${seasonText} "${inserted.title}" adicionada. id=${inserted.insertId} tabela=${inserted.table} ativos=${inserted.total}`
+    );
   } catch (error) {
     console.error(error);
     res.status(200).type("text/plain").send(`Erro ao adicionar: ${error.message}`);
+  }
+}
+
+async function handleDebug(req, res) {
+  try {
+    if (!checkToken(req, res)) return;
+    const { db, table, columns } = await getWatchlistInfo();
+    const idCol = pick(columns, "id") || columns[0];
+    const titleCol = pick(columns, "title", "name");
+    const typeCol = pick(columns, "contentType", "content_type", "type");
+    const activeCol = pick(columns, "isActive", "is_active");
+    const orderCol = pick(columns, "displayOrder", "display_order", "order");
+    const createdCol = pick(columns, "createdAt", "created_at");
+
+    const selectCols = [idCol, titleCol, typeCol, activeCol, orderCol, createdCol].filter(Boolean);
+    const order = createdCol ? `\`${createdCol}\` DESC` : `\`${idCol}\` DESC`;
+
+    const [rows] = await db.query(
+      `SELECT ${selectCols.map((c) => `\`${c}\``).join(", ")} FROM \`${table}\` ORDER BY ${order} LIMIT 20`
+    );
+
+    res.type("text/plain").send(
+      `Tabela: ${table}\nColunas: ${columns.join(", ")}\n\nÚltimos itens:\n` +
+      rows.map((r) => JSON.stringify(r)).join("\n")
+    );
+  } catch (error) {
+    res.status(200).type("text/plain").send(`Erro debug: ${error.message}`);
   }
 }
 
@@ -222,5 +292,6 @@ app.get("/", (_req, res) => res.type("text/plain").send("OK - API StreamElements
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/add", handleAdd);
 app.post("/add", handleAdd);
+app.get("/debug", handleDebug);
 
 app.listen(PORT, () => console.log(`API rodando na porta ${PORT}`));
