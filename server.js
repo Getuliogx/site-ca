@@ -222,8 +222,7 @@ async function handleAdd(req, res) {
 
     const seasonText = inserted.seasonNumber ? ` T${inserted.seasonNumber}` : "";
     res.status(200).type("text/plain").send(
-      `✅ ${inserted.contentType}${seasonText} "${inserted.title}" adicionada. id=${inserted.insertId} ordem=${inserted.displayOrder}`
-    );
+      `✅ ${inserted.contentType}${seasonText} "${inserted.title}" adicionado.);
   } catch (error) {
     console.error(error);
     res.status(200).type("text/plain").send(`Erro ao adicionar: ${error.message}`);
