@@ -4,7 +4,6 @@ import mysql from "mysql2/promise";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
@@ -18,7 +17,6 @@ async function getPool() {
   if (pool) return pool;
   const databaseUrl = process.env.DATABASE_URL || "";
   if (!databaseUrl) throw new Error("DATABASE_URL não configurado no Render.");
-
   pool = mysql.createPool({
     uri: cleanDatabaseUrl(databaseUrl),
     ssl: { minVersion: "TLSv1.2", rejectUnauthorized: false },
@@ -29,12 +27,25 @@ async function getPool() {
     queueLimit: 0,
     enableKeepAlive: true,
   });
-
   return pool;
 }
 
 function normalize(text = "") {
   return String(text).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+function titleCase(text) {
+  return String(text || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .map((word) => {
+      const lower = word.toLowerCase();
+      if (["a", "o", "as", "os", "de", "da", "do", "das", "dos", "e"].includes(lower)) return lower;
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ")
+    .replace(/^./, (c) => c.toUpperCase());
 }
 
 function checkToken(req, res) {
@@ -49,7 +60,6 @@ function checkToken(req, res) {
 
 function parseCommand(raw = "") {
   let q = String(raw || "").trim().replace(/^!add\s+/i, "").trim();
-
   const typeMatch = q.match(/^(filme|filmes|movie|serie|série|series|séries|anime|animes)\s+(.+)$/i);
   if (!typeMatch) return { error: "Use: !add filme nome ano | !add serie nome t1 | !add anime nome t1" };
 
@@ -58,12 +68,10 @@ function parseCommand(raw = "") {
 
   let contentType = "Filme";
   let tmdbType = "movie";
-
   if (rawType.includes("serie")) {
     contentType = "Série";
     tmdbType = "tv";
   }
-
   if (rawType.includes("anime")) {
     contentType = "Anime";
     tmdbType = "tv";
@@ -93,23 +101,12 @@ function parseCommand(raw = "") {
 async function tmdbSearch(parsed) {
   const token = process.env.TMDB_ACCESS_TOKEN || "";
   const apiKey = process.env.TMDB_API_KEY || "";
+
   if (!token && !apiKey) {
-    return {
-      tmdbId: null,
-      title: parsed.title,
-      year: parsed.year || null,
-      imageUrl: "",
-      description: "",
-    };
+    return { tmdbId: null, title: titleCase(parsed.title), year: parsed.year || null, imageUrl: "", description: "" };
   }
 
-  const params = new URLSearchParams({
-    query: parsed.title,
-    include_adult: "false",
-    language: "pt-BR",
-    page: "1",
-  });
-
+  const params = new URLSearchParams({ query: parsed.title, include_adult: "false", language: "pt-BR", page: "1" });
   if (parsed.year && parsed.tmdbType === "movie") params.set("year", parsed.year);
   if (parsed.year && parsed.tmdbType === "tv") params.set("first_air_date_year", parsed.year);
 
@@ -118,39 +115,27 @@ async function tmdbSearch(parsed) {
 
   try {
     const response = await fetch(url, { headers });
-    if (!response.ok) throw new Error("TMDB sem resposta OK");
+    if (!response.ok) throw new Error("TMDB falhou");
     const data = await response.json();
     const item = Array.isArray(data.results) ? data.results[0] : null;
     if (!item) throw new Error("TMDB sem resultado");
 
     const foundTitle = parsed.tmdbType === "movie" ? item.title : item.name;
     const date = parsed.tmdbType === "movie" ? item.release_date : item.first_air_date;
-
     return {
       tmdbId: item.id || null,
-      title: foundTitle || parsed.title,
+      title: foundTitle || titleCase(parsed.title),
       year: date ? String(date).slice(0, 4) : parsed.year || null,
       imageUrl: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : "",
       description: item.overview || "",
     };
   } catch {
-    return {
-      tmdbId: null,
-      title: parsed.title,
-      year: parsed.year || null,
-      imageUrl: "",
-      description: "",
-    };
+    return { tmdbId: null, title: titleCase(parsed.title), year: parsed.year || null, imageUrl: "", description: "" };
   }
 }
 
 async function tableExists(db, table) {
-  try {
-    await db.query(`SELECT 1 FROM \`${table}\` LIMIT 1`);
-    return true;
-  } catch {
-    return false;
-  }
+  try { await db.query(`SELECT 1 FROM \`${table}\` LIMIT 1`); return true; } catch { return false; }
 }
 
 async function getColumns(db, table) {
@@ -167,21 +152,10 @@ async function getWatchlistInfo() {
   const db = await getPool();
   for (const table of ["watchlist", "watchlists"]) {
     if (await tableExists(db, table)) {
-      const columns = await getColumns(db, table);
-      return { db, table, columns };
+      return { db, table, columns: await getColumns(db, table) };
     }
   }
   throw new Error("Tabela watchlist/watchlists não encontrada.");
-}
-
-async function countActive(db, table) {
-  try {
-    const [rows] = await db.query(`SELECT COUNT(*) AS total FROM \`${table}\` WHERE \`isActive\` = 1`);
-    return rows?.[0]?.total ?? 0;
-  } catch {
-    const [rows] = await db.query(`SELECT COUNT(*) AS total FROM \`${table}\``);
-    return rows?.[0]?.total ?? 0;
-  }
 }
 
 async function insertWatchlist(parsed, media) {
@@ -194,24 +168,24 @@ async function insertWatchlist(parsed, media) {
 
   const titleCol = pick(columns, "title", "name");
   const typeCol = pick(columns, "contentType", "content_type", "type");
-  const isActiveCol = pick(columns, "isActive", "is_active");
+  const activeCol = pick(columns, "isActive", "is_active");
   const orderCol = pick(columns, "displayOrder", "display_order", "order");
 
   set(pick(columns, "userId", "user_id"), Number(process.env.WATCHLIST_USER_ID || 1));
-  set(titleCol, media?.title || parsed.title);
+  set(titleCol, media?.title || titleCase(parsed.title));
   set(typeCol, parsed.contentType);
+  set(activeCol, 1);
   set(pick(columns, "status"), "Na Fila");
-  set(isActiveCol, 1);
   set(pick(columns, "tmdbId", "tmdb_id"), media?.tmdbId || undefined);
   set(pick(columns, "year"), media?.year || parsed.year || undefined);
   set(pick(columns, "imageUrl", "image_url", "posterUrl", "poster_url"), media?.imageUrl || "");
   set(pick(columns, "description"), media?.description || "");
   set(pick(columns, "seasonNumber", "season_number"), parsed.seasonNumber || undefined);
 
-  if (orderCol) {
-    const [rows] = await db.query(`SELECT COALESCE(MAX(\`${orderCol}\`), 0) + 1 AS nextOrder FROM \`${table}\``);
-    set(orderCol, rows?.[0]?.nextOrder || 1);
-  }
+  // IMPORTANTE:
+  // O admin do site parece ordenar por display_order ASC.
+  // Para aparecer no começo da Watchlist, novos itens recebem número negativo.
+  if (orderCol) set(orderCol, -Date.now());
 
   const now = new Date();
   set(pick(columns, "createdAt", "created_at"), now);
@@ -223,25 +197,20 @@ async function insertWatchlist(parsed, media) {
   const insertColumns = Object.keys(values);
   const sql = `INSERT INTO \`${table}\` (${insertColumns.map((c) => `\`${c}\``).join(", ")}) VALUES (${insertColumns.map(() => "?").join(", ")})`;
   const [result] = await db.query(sql, insertColumns.map((c) => values[c]));
-  const insertId = result?.insertId || null;
-
-  const total = await countActive(db, table);
 
   return {
     table,
-    insertId,
-    total,
+    insertId: result?.insertId || null,
     title: values[titleCol],
     contentType: parsed.contentType,
     seasonNumber: parsed.seasonNumber,
-    columnsUsed: insertColumns,
+    displayOrder: values[orderCol],
   };
 }
 
 async function handleAdd(req, res) {
   try {
     if (!checkToken(req, res)) return;
-
     const q = String(req.query.q || req.body?.q || "");
     const user = String(req.query.user || req.body?.user || "chat");
 
@@ -253,7 +222,7 @@ async function handleAdd(req, res) {
 
     const seasonText = inserted.seasonNumber ? ` T${inserted.seasonNumber}` : "";
     res.status(200).type("text/plain").send(
-      `✅ ${inserted.contentType}${seasonText} "${inserted.title}" adicionada. id=${inserted.insertId} tabela=${inserted.table} ativos=${inserted.total}`
+      `✅ ${inserted.contentType}${seasonText} "${inserted.title}" adicionada. id=${inserted.insertId} ordem=${inserted.displayOrder}`
     );
   } catch (error) {
     console.error(error);
@@ -271,18 +240,10 @@ async function handleDebug(req, res) {
     const activeCol = pick(columns, "isActive", "is_active");
     const orderCol = pick(columns, "displayOrder", "display_order", "order");
     const createdCol = pick(columns, "createdAt", "created_at");
-
     const selectCols = [idCol, titleCol, typeCol, activeCol, orderCol, createdCol].filter(Boolean);
-    const order = createdCol ? `\`${createdCol}\` DESC` : `\`${idCol}\` DESC`;
-
-    const [rows] = await db.query(
-      `SELECT ${selectCols.map((c) => `\`${c}\``).join(", ")} FROM \`${table}\` ORDER BY ${order} LIMIT 20`
-    );
-
-    res.type("text/plain").send(
-      `Tabela: ${table}\nColunas: ${columns.join(", ")}\n\nÚltimos itens:\n` +
-      rows.map((r) => JSON.stringify(r)).join("\n")
-    );
+    const order = orderCol ? `\`${orderCol}\` ASC` : (createdCol ? `\`${createdCol}\` DESC` : `\`${idCol}\` DESC`);
+    const [rows] = await db.query(`SELECT ${selectCols.map((c) => `\`${c}\``).join(", ")} FROM \`${table}\` ORDER BY ${order} LIMIT 30`);
+    res.type("text/plain").send(`Tabela: ${table}\nColunas: ${columns.join(", ")}\n\nItens no topo da ordem do admin:\n` + rows.map((r) => JSON.stringify(r)).join("\n"));
   } catch (error) {
     res.status(200).type("text/plain").send(`Erro debug: ${error.message}`);
   }
