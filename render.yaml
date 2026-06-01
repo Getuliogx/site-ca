@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: carolina-streamelements-watchlist
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: COMMAND_SECRET
+        value: carolina-add-watchlist
+      - key: WATCHLIST_USER_ID
+        value: "1"
+      - key: DATABASE_URL
+        sync: false
+      - key: TMDB_ACCESS_TOKEN
+        sync: false
+      - key: TMDB_API_KEY
+        sync: false
