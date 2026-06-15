@@ -10,6 +10,12 @@ services:
         value: carolina-add-watchlist
       - key: WATCHLIST_USER_ID
         value: "1"
+      - key: ALLOWED_CHANNELS
+        value: carolinaporto
+      - key: ALLOWED_USERS
+        value: carolinaporto
+      - key: ADD_COOLDOWN_MS
+        value: "3000"
       - key: DATABASE_URL
         sync: false
       - key: TMDB_ACCESS_TOKEN

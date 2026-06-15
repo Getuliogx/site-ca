@@ -58,6 +58,82 @@ function checkToken(req, res) {
   return true;
 }
 
+function envList(...names) {
+  const values = [];
+  for (const name of names) {
+    const raw = String(process.env[name] || "");
+    raw
+      .split(",")
+      .map((item) => normalize(item).replace(/^[@#]/, ""))
+      .filter(Boolean)
+      .forEach((item) => values.push(item));
+  }
+  return [...new Set(values)];
+}
+
+function requestValue(req, ...names) {
+  for (const name of names) {
+    const value = req.query?.[name] ?? req.body?.[name];
+    if (value !== undefined && value !== null && String(value).trim() !== "") return value;
+  }
+  return "";
+}
+
+function getAllowedChannels() {
+  return envList("ALLOWED_CHANNELS", "AUTHORIZED_CHANNELS", "STREAMER_CHANNELS", "CHANNELS");
+}
+
+function getAllowedUsers() {
+  return envList("ALLOWED_USERS", "AUTHORIZED_USERS", "ALLOWED_STREAMERS", "STREAMERS", "ALLOWED_MODS", "MODS");
+}
+
+function checkPermission(req, res) {
+  const channel = normalize(requestValue(req, "channel", "canal", "room", "broadcaster")).replace(/^[@#]/, "");
+  const user = normalize(requestValue(req, "user", "usuario", "sender", "nick", "username")).replace(/^[@#]/, "");
+
+  const allowedChannels = getAllowedChannels();
+  const allowedUsers = getAllowedUsers();
+
+  if (allowedChannels.length > 0 && !allowedChannels.includes(channel)) {
+    res.status(403).type("text/plain").send("Canal não autorizado.");
+    return false;
+  }
+
+  if (allowedUsers.length > 0 && !allowedUsers.includes(user)) {
+    res.status(403).type("text/plain").send("Usuário não autorizado.");
+    return false;
+  }
+
+  if (allowedChannels.length > 0 && !channel) {
+    res.status(403).type("text/plain").send("Canal não informado pelo comando.");
+    return false;
+  }
+
+  if (allowedUsers.length > 0 && !user) {
+    res.status(403).type("text/plain").send("Usuário não informado pelo comando.");
+    return false;
+  }
+
+  return true;
+}
+
+const recentAdds = new Map();
+
+function checkRateLimit(req, res) {
+  const user = normalize(requestValue(req, "user", "usuario", "sender", "nick", "username")).replace(/^[@#]/, "") || req.ip || "unknown";
+  const now = Date.now();
+  const last = recentAdds.get(user) || 0;
+  const cooldownMs = Number(process.env.ADD_COOLDOWN_MS || 3000);
+
+  if (cooldownMs > 0 && now - last < cooldownMs) {
+    res.status(429).type("text/plain").send("Aguarde alguns segundos para usar de novo.");
+    return false;
+  }
+
+  recentAdds.set(user, now);
+  return true;
+}
+
 function parseCommand(raw = "") {
   let q = String(raw || "").trim().replace(/^!add\s+/i, "").trim();
   const typeMatch = q.match(/^(filme|filmes|movie|serie|série|series|séries|anime|animes)\s+(.+)$/i);
@@ -211,6 +287,9 @@ async function insertWatchlist(parsed, media) {
 async function handleAdd(req, res) {
   try {
     if (!checkToken(req, res)) return;
+    if (!checkPermission(req, res)) return;
+    if (!checkRateLimit(req, res)) return;
+
     const q = String(req.query.q || req.body?.q || "");
     const user = String(req.query.user || req.body?.user || "chat");
 
@@ -251,6 +330,14 @@ async function handleDebug(req, res) {
 
 app.get("/", (_req, res) => res.type("text/plain").send("OK - API StreamElements Watchlist"));
 app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/permissions", (req, res) => {
+  if (!checkToken(req, res)) return;
+  res.json({
+    allowedChannels: getAllowedChannels(),
+    allowedUsers: getAllowedUsers(),
+    cooldownMs: Number(process.env.ADD_COOLDOWN_MS || 3000),
+  });
+});
 app.get("/add", handleAdd);
 app.post("/add", handleAdd);
 app.get("/debug", handleDebug);
