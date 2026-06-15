@@ -136,11 +136,11 @@ function checkRateLimit(req, res) {
 
 function parseCommand(raw = "") {
   let q = String(raw || "").trim().replace(/^!add\s+/i, "").trim();
-  const typeMatch = q.match(/^(filme|filmes|movie|serie|série|series|séries|anime|animes)\s+(.+)$/i);
-  if (!typeMatch) return { error: "Use: !add filme nome ano | !add serie nome t1 | !add anime nome t1" };
+  const typeMatch = q.match(/^(filme|filmes|movie|serie|série|series|séries|anime|animes|desenho|desenhos)\s+(.+)$/i);
+  if (!typeMatch) return { error: "Use: !add filme nome ano | !add serie nome ano T1 | !add anime nome ano T1" };
 
   const rawType = normalize(typeMatch[1]);
-  let rest = typeMatch[2].trim();
+  let rest = typeMatch[2].trim().replace(/\s+/g, " ");
 
   let contentType = "Filme";
   let tmdbType = "movie";
@@ -152,23 +152,47 @@ function parseCommand(raw = "") {
     contentType = "Anime";
     tmdbType = "tv";
   }
+  if (rawType.includes("desenho")) {
+    contentType = "Desenho";
+    tmdbType = "tv";
+  }
 
   let seasonNumber = null;
-  const seasonMatch = rest.match(/\b(?:t|temp|temporada)\s*(\d{1,2})\b/i);
+
+  // Aceita: T1, t1, temp 1, temporada 1, temporada: 1, - T1.
+  const seasonMatch = rest.match(/(?:^|[\s\-–—|,/])(?:t|temp|temporada)\s*[:#ºª\-]?\s*(\d{1,2})(?=$|[\s\-–—|,/])/i);
   if (seasonMatch) {
     seasonNumber = Number(seasonMatch[1]);
-    rest = rest.replace(seasonMatch[0], "").trim();
+    rest = rest.replace(seasonMatch[0], " ").trim();
   }
 
   let year = null;
-  const yearMatches = [...rest.matchAll(/\b(19\d{2}|20\d{2})\b/g)];
+
+  // Aceita ano em qualquer parte: "A Múmia 1999", "A Múmia (1999)", "2018 Perdidos no Espaço T1".
+  const yearMatches = [...rest.matchAll(/(?:^|[^0-9])((?:19|20)\d{2})(?!\d)/g)];
   if (yearMatches.length > 0) {
     const last = yearMatches[yearMatches.length - 1][1];
     year = last;
-    rest = rest.replace(new RegExp(`\\b${last}\\b`, "g"), "").trim();
+    rest = rest.replace(new RegExp(`(^|[^0-9])${last}(?!\\d)`, "g"), "$1").trim();
   }
 
-  const title = rest.replace(/\s+/g, " ").trim();
+  // Mantém compatibilidade com o formato antigo para séries/animes/desenhos:
+  // "!add serie Nome 1" vira temporada 1, mas filme "Distrito 9 2009" não vira temporada.
+  if (tmdbType === "tv" && !seasonNumber) {
+    const oldSeasonMatch = rest.match(/(.+?)\s+(\d{1,2})$/);
+    if (oldSeasonMatch && /[A-Za-zÀ-ÿ]/.test(oldSeasonMatch[1])) {
+      seasonNumber = Number(oldSeasonMatch[2]);
+      rest = oldSeasonMatch[1].trim();
+    }
+  }
+
+  const title = rest
+    .replace(/[()\[\]{}]+/g, " ")
+    .replace(/\s*[-–—|,/]+\s*$/g, "")
+    .replace(/^\s*[-–—|,/]+\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
   if (!title) return { error: "Faltou o nome." };
 
   return { contentType, tmdbType, title, year, seasonNumber };
@@ -299,9 +323,10 @@ async function handleAdd(req, res) {
     const media = await tmdbSearch(parsed);
     const inserted = await insertWatchlist(parsed, media);
 
+    const yearText = media?.year || parsed.year ? ` (${media?.year || parsed.year})` : "";
     const seasonText = inserted.seasonNumber ? ` T${inserted.seasonNumber}` : "";
     res.status(200).type("text/plain").send(
-      `✅ ${inserted.contentType}${seasonText} "${inserted.title}" adicionado.`
+      `✅ ${inserted.contentType}${seasonText} "${inserted.title}"${yearText} adicionado.`
     );
   } catch (error) {
     console.error(error);

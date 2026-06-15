@@ -48,6 +48,32 @@ Se o usuário não estiver na lista do Render, bloqueia com:
 Usuário não autorizado.
 ```
 
+## Formatos aceitos com ano
+
+Agora o comando aceita ano para diferenciar nomes repetidos:
+
+```txt
+!add filme a mumia 1999
+!add filme A Múmia (1999)
+!add serie perdidos no espaço 2018 T1
+!add serie perdidos no espaço T1 2018
+!add anime dragon ball z 1989 T1
+!add desenho ben 10 2005 T1
+```
+
+Também mantém o formato antigo para temporada:
+
+```txt
+!add serie lost 1
+```
+
+Números que fazem parte do nome continuam funcionando:
+
+```txt
+!add filme Distrito 9 2009
+!add filme 1917 2019
+```
+
 ## Teste de permissões
 
 No navegador:
