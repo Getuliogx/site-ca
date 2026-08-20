@@ -1,5 +1,10 @@
 # site-ca - StreamElements Watchlist
 
+## Correção da ordem (1.4.1)
+
+Novos itens agora são gravados com `display_order = 0`.
+A lógica antiga usava `-Date.now()`, que ultrapassava o limite de um `INT` do MySQL e acabava virando `-2147483648`.
+
 ## Proteção adicionada
 
 O servidor agora bloqueia o comando `/add` usando:

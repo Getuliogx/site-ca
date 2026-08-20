@@ -282,10 +282,10 @@ async function insertWatchlist(parsed, media) {
   set(pick(columns, "description"), media?.description || "");
   set(pick(columns, "seasonNumber", "season_number"), parsed.seasonNumber || undefined);
 
-  // IMPORTANTE:
-  // O admin do site parece ordenar por display_order ASC.
-  // Para aparecer no começo da Watchlist, novos itens recebem número negativo.
-  if (orderCol) set(orderCol, -Date.now());
+  // A Watchlist usa a posição 0 para um item recém-adicionado.
+  // Não use Date.now() negativo aqui: display_order normalmente é INT (32 bits)
+  // e valores menores que -2147483648 estouram/ficam presos nesse limite.
+  if (orderCol) set(orderCol, 0);
 
   const now = new Date();
   set(pick(columns, "createdAt", "created_at"), now);
